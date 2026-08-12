@@ -1,0 +1,154 @@
+name: Release images
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Release tag already reachable from main
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+      - id: release
+        shell: bash
+        run: |
+          tag=$(git describe --tags --exact-match HEAD)
+          version="v$(tr -d '[:space:]' < VERSION)"
+          test "$tag" = "$version"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.component }} (${{ matrix.arch }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: web
+            context: .
+            file: ./Dockerfile
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - component: web
+            context: .
+            file: ./Dockerfile
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04
+          - component: api
+            context: ./server
+            file: ./server/Dockerfile
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - component: api
+            context: ./server
+            file: ./server/Dockerfile
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-$COMPONENT" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: ${{ matrix.platform }}
+          pull: true
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ needs.validate.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.tag }}
+          cache-from: type=gha,scope=release-${{ matrix.component }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.component }}-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digests-${{ matrix.component }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: Publish ${{ matrix.component }} manifest
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        component: [web, api]
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.component }}-*
+          merge-multiple: true
+      - name: Create multi-arch manifest
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-$COMPONENT"
+          digest_args=()
+          while IFS= read -r digest; do
+            digest_args+=("$image@sha256:$digest")
+          done < <(find "$RUNNER_TEMP/digests" -type f -printf '%f\n' | sort)
+          docker buildx imagetools create \
+            -t "$image:$RELEASE_TAG" \
+            -t "$image:$RELEASE_SHA" \
+            "${digest_args[@]}"

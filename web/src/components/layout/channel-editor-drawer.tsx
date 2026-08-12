@@ -3,7 +3,7 @@ import { ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { defaultBaseUrlForApiFormat, isUniArtCapabilityBaseUrl, normalizeChannelModels, stripChannelModelCapabilities, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -20,6 +20,10 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
         { label: t("config.protocols.ark"), value: "ark" },
     ];
     const capabilityOptions: Array<{ label: string; value: ModelCapability }> = ["image", "video", "text", "audio"].map((value) => ({ label: t(`config.channelEditor.capabilities.${value}`), value: value as ModelCapability }));
+    const capabilityAdapterOptions: Array<{ label: string; value: ModelChannel["capabilityAdapter"]; disabled?: boolean }> = [
+        { label: t("config.channelEditor.capabilityAdapters.auto"), value: "auto" },
+        { label: t("config.channelEditor.capabilityAdapters.uniart"), value: "uniart", disabled: !isUniArtCapabilityBaseUrl(draft?.baseUrl || "") },
+    ];
 
     useEffect(() => {
         if (open && channel) setDraft(channel);
@@ -35,9 +39,19 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
         patch({ apiFormat, baseUrl });
     };
 
-    const applySelection = (names: string[]) => {
+    const changeCapabilityAdapter = (capabilityAdapter: ModelChannel["capabilityAdapter"]) => {
+        const models = capabilityAdapter === "uniart" ? normalizeChannelModels(draft.models, capabilityAdapter) : stripChannelModelCapabilities(draft.models);
+        patch({ capabilityAdapter, models });
+    };
+
+    const applySelection = (models: ChannelModel[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
-        setModels(names.map((name) => map.get(name) || { name, capability: guessCapability(name) }));
+        setModels(
+            models.map((model) => {
+                const existing = map.get(model.name);
+                return { ...model, script: existing?.script };
+            }),
+        );
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
@@ -45,7 +59,9 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
 
     const save = () => {
-        onSave({ ...draft, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
+        const capabilityAdapter = draft.capabilityAdapter === "uniart" && !isUniArtCapabilityBaseUrl(draft.baseUrl) ? "auto" : draft.capabilityAdapter;
+        const sourceModels = capabilityAdapter === draft.capabilityAdapter ? draft.models : stripChannelModelCapabilities(draft.models);
+        onSave({ ...draft, capabilityAdapter, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(sourceModels, capabilityAdapter) });
         onClose();
     };
 
@@ -82,6 +98,11 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                     <span className="mb-1 block text-sm font-medium">API Key</span>
                     <Input.Password value={draft.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder="sk-..." />
                 </label>
+                <label className="block md:col-span-2">
+                    <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.capabilityAdapter")}</span>
+                    <Select className="w-full" value={draft.capabilityAdapter} options={capabilityAdapterOptions} onChange={changeCapabilityAdapter} />
+                    <span className="mt-1 block text-xs text-stone-500">{t("config.channelEditor.capabilityAdapterDescription")}</span>
+                </label>
             </div>
 
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -115,7 +136,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 )}
             </div>
 
-            <ModelSelectModal open={selectOpen} channel={draft} selectedNames={draft.models.map((model) => model.name)} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
+            <ModelSelectModal open={selectOpen} channel={draft} selectedModels={draft.models} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
 
             <ModelScriptEditor
                 open={Boolean(scriptTarget)}

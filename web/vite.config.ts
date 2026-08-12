@@ -50,4 +50,16 @@ export default defineConfig({
         __APP_VERSION__: JSON.stringify(localVersion),
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
+    server: {
+        proxy: {
+            "/api": {
+                target: process.env.VITE_API_PROXY_TARGET || "http://localhost:3002",
+                changeOrigin: true,
+            },
+            "/video-assets": {
+                target: process.env.VITE_API_PROXY_TARGET || "http://localhost:3002",
+                changeOrigin: true,
+            },
+        },
+    },
 });

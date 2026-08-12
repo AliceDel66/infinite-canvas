@@ -1,0 +1,158 @@
+name: Production CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, tag, or branch already reachable from main
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve deploy commit
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.workflow_run.head_sha }}
+      - id: resolve
+        name: Require commit reachable from main
+        shell: bash
+        run: |
+          sha=$(git rev-parse HEAD)
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$sha" origin/main
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Require successful CI for manual deployment
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          run_id=$(gh api \
+            --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100" \
+            --jq ".workflow_runs[] | select(.head_sha == \"$DEPLOY_SHA\") | .id" | head -n 1)
+          test -n "$run_id"
+
+  build:
+    name: Build ${{ matrix.component }} image
+    needs: resolve
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: web
+            context: .
+            file: ./Dockerfile
+          - component: api
+            context: ./server
+            file: ./server/Dockerfile
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image
+        name: Resolve image name
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-$COMPONENT" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: true
+          pull: true
+          tags: ${{ steps.image.outputs.name }}:${{ needs.resolve.outputs.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=production-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=production-${{ matrix.component }}
+          provenance: mode=max
+          sbom: true
+
+  deploy:
+    name: Deploy production
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    steps:
+      - name: Configure restricted SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/infinite-canvas-deploy"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/infinite-canvas-deploy" "$HOME/.ssh/known_hosts"
+      - name: Verify restricted deployment endpoint
+        shell: bash
+        env:
+          SSH_HOST: ${{ vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ vars.PRODUCTION_SSH_PORT }}
+          SSH_USER: ${{ vars.PRODUCTION_SSH_USER }}
+        run: >-
+          ssh -i "$HOME/.ssh/infinite-canvas-deploy"
+          -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+          -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" probe
+      - name: Deploy commit with backup and rollback
+        shell: bash
+        env:
+          DEPLOY_SHA: ${{ needs.resolve.outputs.sha }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSH_HOST: ${{ vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ vars.PRODUCTION_SSH_PORT }}
+          SSH_USER: ${{ vars.PRODUCTION_SSH_USER }}
+        run: |
+          printf '%s\n' "$GHCR_TOKEN" | ssh \
+            -i "$HOME/.ssh/infinite-canvas-deploy" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" \
+            "deploy $GITHUB_REPOSITORY $DEPLOY_SHA $GITHUB_ACTOR"
+      - name: Verify public health
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: curl --fail --show-error --silent --retry 6 --retry-all-errors --max-time 20 "$PRODUCTION_URL/api/v1/health"

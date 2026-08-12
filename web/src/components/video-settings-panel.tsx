@@ -1,12 +1,14 @@
 import { type ReactNode } from "react";
 import { Switch } from "antd";
 import { useTranslation } from "react-i18next";
+import { FileText, GalleryHorizontalEnd, Image, Images, Layers3, type LucideIcon } from "lucide-react";
 
 import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { type AiConfig } from "@/stores/use-config-store";
+import { resolveUniArtReferenceMode, resolveUniArtVideoParams, supportedUniArtReferenceModes, type UniArtVideoCapability, type UniArtVideoReferenceMode } from "@/lib/uniart-video";
+import { modelCapabilityOf, videoCapabilityOf, type AiConfig } from "@/stores/use-config-store";
 
 const resolutionOptions = [
     { value: "720", label: "720p" },
@@ -23,7 +25,16 @@ const sizeOptions = [
 ];
 
 const secondOptions = [6, 10, 12, 16, 20];
+const capabilityResolutionOptions = [
+    { value: "480p", label: "480p" },
+    { value: "720p", label: "720p" },
+    { value: "1080p", label: "1080p" },
+    { value: "1440p", label: "2K" },
+    { value: "4k", label: "4K" },
+];
 const seedanceRatioLabelKeys: Record<string, string> = { "16:9": "landscape", "9:16": "portrait", "1:1": "square", "4:3": "standardLandscape", "3:4": "standardPortrait", "21:9": "cinematic", adaptive: "adaptive" };
+const capabilitySizeOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"].map((value) => ({ value, label: videoRatioLabel(value) }));
+const capabilitySecondOptions = Array.from({ length: 12 }, (_, index) => index + 4);
 
 export const videoResolutionOptions = resolutionOptions.map((item) => ({ value: item.value, label: item.label }));
 export const videoSizeOptions = sizeOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.video.sizes.${item.labelKey}`); } }));
@@ -31,14 +42,21 @@ export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark", value: string) => void;
+    model?: string;
+    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
+    showReferenceModes?: boolean;
     className?: string;
 };
 
-export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
+export function VideoSettingsPanel({ config, model, onConfigChange, theme, showTitle = true, showReferenceModes = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
+    const selectedModel = model || (modelCapabilityOf(config, config.model) === "video" ? config.model : config.videoModel || config.model);
+    const uniArtCapability = videoCapabilityOf(config, selectedModel);
+    if (uniArtCapability) {
+        return <CapabilityVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} showReferenceModes={showReferenceModes} className={className} capability={uniArtCapability} />;
+    }
     if (isSeedanceVideoConfig(config)) {
         return <SeedanceVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
     }
@@ -108,6 +126,99 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     );
 }
 
+function CapabilityVideoSettingsPanel({ config, onConfigChange, theme, showTitle, showReferenceModes, className, capability }: VideoSettingsPanelProps & { capability: UniArtVideoCapability }) {
+    const { t } = useTranslation();
+    const params = resolveUniArtVideoParams(capability, { seconds: config.videoSeconds, ratio: config.size, resolution: config.vquality });
+    const availableResolutions = capability.resolutions?.length ? capability.resolutions.map((value) => ({ value, label: resolutionTokenLabel(value) })) : capabilityResolutionOptions;
+    const availableRatios = capability.ratios?.length ? capability.ratios.map((value) => ({ value, label: videoRatioLabel(value) })) : capabilitySizeOptions;
+    const availableDurations = capability.durations?.length ? capability.durations : capabilitySecondOptions;
+    const generateAudio = boolConfig(config.videoGenerateAudio, true);
+
+    return (
+        <ImageSettingsTheme theme={theme}>
+            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
+                {showReferenceModes ? <ReferenceModeSettings capability={capability} value={config.videoReferenceMode} theme={theme} onChange={(value) => onConfigChange("videoReferenceMode", value)} /> : null}
+                <SettingGroup title={t("settingsPanels.video.resolution")} color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {availableResolutions.map((item) => (
+                            <OptionPill key={item.value} selected={params.resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
+                                {item.label}
+                            </OptionPill>
+                        ))}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title={t("settingsPanels.video.ratio")} color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {availableRatios.map((item) => (
+                            <button key={item.value} type="button" className="flex h-[68px] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent px-1 text-sm transition hover:opacity-80" style={{ borderColor: params.ratio === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()} onClick={() => onConfigChange("size", item.value)}>
+                                <SizePreview width={ratioPreview(item.value).width} height={ratioPreview(item.value).height} color={theme.node.text} />
+                                <span>{item.label}</span>
+                                <span className="text-[10px] leading-none opacity-55">{item.value}</span>
+                            </button>
+                        ))}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title={t("settingsPanels.video.duration")} color={theme.node.muted}>
+                    <div className="grid grid-cols-4 gap-2.5">
+                        {availableDurations.map((value) => (
+                            <OptionPill key={value} selected={params.seconds === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                {value}s
+                            </OptionPill>
+                        ))}
+                    </div>
+                </SettingGroup>
+                {capability.supportsGenerateAudio === false ? null : (
+                    <SettingGroup title={t("settingsPanels.video.output")} color={theme.node.muted}>
+                        <div className="rounded-xl border px-2.5 py-1" style={{ borderColor: theme.node.stroke }}>
+                            <SwitchRow label={t("settingsPanels.video.generateAudio")} checked={generateAudio} theme={theme} onChange={(checked) => onConfigChange("videoGenerateAudio", String(checked))} />
+                        </div>
+                    </SettingGroup>
+                )}
+            </div>
+        </ImageSettingsTheme>
+    );
+}
+
+export function VideoReferenceModeSelector({ config, model, onConfigChange, theme }: Pick<VideoSettingsPanelProps, "config" | "model" | "onConfigChange" | "theme">) {
+    const capability = videoCapabilityOf(config, model || config.videoModel || config.model);
+    if (!capability || !supportedUniArtReferenceModes(capability).length) return null;
+    return (
+        <ImageSettingsTheme theme={theme}>
+            <ReferenceModeSettings capability={capability} value={config.videoReferenceMode} theme={theme} onChange={(value) => onConfigChange("videoReferenceMode", value)} />
+        </ImageSettingsTheme>
+    );
+}
+
+const referenceModeIcons: Record<UniArtVideoReferenceMode, LucideIcon> = {
+    text_to_video: FileText,
+    image_to_video: Image,
+    image_reference: Images,
+    first_last_frames: GalleryHorizontalEnd,
+    omni_reference: Layers3,
+};
+
+function ReferenceModeSettings({ capability, value, theme, onChange }: { capability: UniArtVideoCapability; value: string; theme: CanvasTheme; onChange: (value: UniArtVideoReferenceMode) => void }) {
+    const { t } = useTranslation();
+    const modes = supportedUniArtReferenceModes(capability);
+    const selected = resolveUniArtReferenceMode(capability, value);
+    return (
+        <SettingGroup title={t("settingsPanels.video.referenceMode")} color={theme.node.muted}>
+            <div className={`grid gap-1.5 ${modes.length >= 5 ? "grid-cols-5" : modes.length === 4 ? "grid-cols-4" : "grid-cols-3"}`}>
+                {modes.map((mode) => {
+                    const Icon = referenceModeIcons[mode];
+                    return (
+                        <button key={mode} type="button" className="flex min-h-11 min-w-0 cursor-pointer flex-col items-center justify-center gap-1 overflow-hidden rounded-xl border bg-transparent px-0.5 text-[10px] font-medium leading-none transition hover:opacity-80" style={{ borderColor: selected === mode ? theme.node.text : theme.node.stroke, color: theme.node.text }} aria-pressed={selected === mode} onMouseDown={(event) => event.stopPropagation()} onClick={() => onChange(mode)}>
+                            <Icon className="size-3.5 shrink-0" />
+                            <span className="max-w-full whitespace-nowrap">{t(`settingsPanels.video.referenceModes.${mode}`)}</span>
+                        </button>
+                    );
+                })}
+            </div>
+        </SettingGroup>
+    );
+}
+
 function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
     const resolution = normalizeSeedanceResolution(config.vquality);
@@ -169,7 +280,7 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
 }
 
 export function videoResolutionLabel(value: string) {
-    return `${normalizeVideoResolutionValue(value)}p`;
+    return resolutionTokenLabel(value);
 }
 
 export function videoSizeLabel(value: string) {
@@ -196,6 +307,22 @@ export function normalizeVideoResolutionValue(value: string) {
     if (value === "480p" || value === "low") return "480";
     if (value === "720p" || value === "auto" || value === "high" || value === "medium") return "720";
     return value.replace(/p$/i, "") || "720";
+}
+
+function videoRatioLabel(value: string) {
+    if (value === "auto" || value === "adaptive") return i18n.t("settingsPanels.video.adaptive");
+    const key = seedanceRatioLabelKeys[value];
+    return key ? i18n.t(`settingsPanels.video.ratios.${key}`) : value;
+}
+
+function resolutionTokenLabel(value: string) {
+    const normalized = String(value || "720p").trim();
+    if (/^(?:1440p|2k)$/i.test(normalized)) return "2K";
+    if (/^3k$/i.test(normalized)) return "3K";
+    if (/^4k$/i.test(normalized)) return "4K";
+    if (/^\d+(?:p|k)$/i.test(normalized)) return normalized.toLowerCase();
+    const plain = normalizeVideoResolutionValue(normalized);
+    return /^\d+$/.test(plain) ? `${plain}p` : plain;
 }
 
 function OptionPill({ selected, disabled = false, theme, onClick, children }: { selected: boolean; disabled?: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {

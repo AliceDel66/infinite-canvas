@@ -5,15 +5,43 @@ description: Deploy Infinite Canvas with Docker Compose
 
 # Docker Deployment
 
-## Use the published image
+## Run the complete stack
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
-docker compose up -d
+cp .env.example .env
+# Replace the database, MinIO, S3, and Better Auth secrets.
+docker compose up -d --build
 ```
 
 Open `http://localhost:3000`.
+
+## Current production domain
+
+The current production entry point is `https://canvas.zgonline.top`. Host Nginx should proxy this domain to the app port bound only on loopback. Override at least these values in the production `.env`:
+
+```dotenv
+APP_BIND_HOST=127.0.0.1
+APP_PORT=3000
+APP_ORIGINS=https://canvas.zgonline.top
+BETTER_AUTH_URL=https://canvas.zgonline.top
+POSTGRES_DATA_PATH=/data/infinite-canvas/postgres
+MINIO_DATA_PATH=/data/infinite-canvas/minio
+BACKUP_ROOT=/data/backups/infinite-canvas
+```
+
+Keep `SUB2API_OIDC_DISCOVERY_URL`, `SUB2API_CLIENT_ID`, and `SUB2API_CLIENT_SECRET` empty until Sub2API exposes an OIDC Provider and the callback is registered.
+
+## CI/CD production contract
+
+Pull requests and `main` pushes run the Web, Server, Docs, plugin, Compose, and shell checks in `.github/workflows/ci.yml`. A successful `main` push publishes `ghcr.io/<owner>/<repository>-web:<commit-sha>` and `ghcr.io/<owner>/<repository>-api:<commit-sha>`, then deploys through the `production` GitHub Environment.
+
+The production SSH key is restricted by `deploy/github-actions-entrypoint.sh`: it accepts only `probe` and an allow-listed repository commit. `deploy/deploy-production.sh` pulls the immutable images, verifies a PostgreSQL/MinIO backup before migration, checks internal and public health, and restores the previous source and image tag if deployment fails. Database migrations must remain backward compatible; an incompatible schema rollback requires the verified backup and an explicit maintenance window.
+
+Version tags publish multi-architecture Web/API images under the same GHCR repositories with both the `v*` tag and commit-SHA tag. Production still deploys the CI-verified commit-SHA image rather than a mutable tag.
+
+Create a GitHub Environment named `production` with these variables: `PRODUCTION_URL`, `PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_PORT`, and `PRODUCTION_SSH_USER`. Add `PRODUCTION_SSH_PRIVATE_KEY` and the verified server host-key line as `PRODUCTION_SSH_KNOWN_HOSTS` secrets. Install `deploy/github-actions-entrypoint.sh` as `/usr/local/sbin/infinite-canvas-github-actions`, install the root-owned `deploy/infinite-canvas-deploy.conf.example` as `/etc/infinite-canvas-deploy.conf` with mode `0600`, then put the matching public deploy key in `authorized_keys` with `restrict,command="/usr/local/sbin/infinite-canvas-github-actions"`. Do not reuse an administrator's daily SSH key.
 
 ## Build locally
 
@@ -37,7 +65,18 @@ cd docs
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
-The main application container only runs Next.js. Canvases, My Assets, generation history, and API keys are stored in the browser by default, while prompt repositories are fetched directly by the frontend. No persistent data volume is required for this data.
+The stack contains the Nginx frontend, Fastify API, a dedicated PostgreSQL database, and private MinIO. Accounts, sessions, and imported domain manifests live in PostgreSQL; media objects live in MinIO. Neither PostgreSQL nor MinIO exposes a host port by default.
+
+After sign-in, the app detects canvases, My Assets, and image/video generation history in the current browser and offers a one-time account-scoped import. IndexedDB is not deleted and remains the current device's working cache; continuous sync of later edits is not implemented yet. API keys, Base URLs, WebDAV/Agent credentials, plugin code, and prompt caches stay local.
+
+## Backup and restore verification
+
+```bash
+./deploy/backup.sh
+./deploy/verify-backup.sh /data/backups/infinite-canvas/<backup-id>
+```
+
+Each backup contains a PostgreSQL custom dump, a MinIO object mirror, and SHA-256 checksums. Verification restores into an isolated temporary PostgreSQL instance and reconciles table/object counts without modifying production. Daily systemd units are in `deploy/systemd/`; copy same-server backups to offsite storage separately.
 
 ## Optional analytics
 
@@ -48,15 +87,9 @@ No analytics are enabled by default. A deployment can enable GA4, Baidu Analytic
 | `ANALYTICS_GA4_ID` | Google Analytics 4 measurement ID (`G-XXXX`) |
 | `ANALYTICS_BAIDU_ID` | Baidu site ID, the hash after `hm.js?` |
 
-```yaml
-services:
-  app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
-    ports:
-      - "3000:3000"
-    environment:
-      ANALYTICS_GA4_ID: G-XXXXXXXXXX
-      ANALYTICS_BAIDU_ID: e8263761cc5c32f5f7a855b8203b965a
+```dotenv
+ANALYTICS_GA4_ID=G-XXXXXXXXXX
+ANALYTICS_BAIDU_ID=e8263761cc5c32f5f7a855b8203b965a
 ```
 
 SPA route changes automatically report page views to enabled providers. Only configure analytics IDs on sites you control, and do not commit them to the repository.

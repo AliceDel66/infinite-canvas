@@ -67,24 +67,27 @@
 
 ## 快速开始
 
-AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地。
+账户和 Session 由 PostgreSQL 后端管理。用户登录后可将当前浏览器中的画布、素材、生成记录和引用媒体一次性导入按账户隔离的 PostgreSQL 与私有对象存储；IndexedDB 仍作为当前设备的工作缓存，后续编辑尚未持续同步。AI API Key、Base URL、WebDAV/Agent 凭据和插件代码只保存在浏览器本地。
 
 ### 本地开发
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
-cd web
-bun install
-bun run dev
+cp .env.example .env
+docker compose -f docker-compose.local.yml up -d --build
 ```
+
+完整服务启动后访问 `http://localhost:3000`。只开发前端时，先启动 PostgreSQL 和 `server/`，再在 `web/` 运行 `bun run dev`；Vite 会把 `/api` 代理到 `http://localhost:3002`。
 
 ### Docker 运行
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
-docker compose up -d
+cp .env.example .env
+# 修改 .env 中的数据库密码和 Better Auth Secret
+docker compose up -d --build
 ```
 
 运行后默认端口3000，可访问 `http://localhost:3000`。

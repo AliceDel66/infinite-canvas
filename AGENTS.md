@@ -23,7 +23,8 @@
 
 - 前端使用 Vite、React、React Router、TypeScript、Ant Design、Tailwind、Zustand。
 - 编写 Ant Design 相关代码时，参考 https://ant.design/llms-full.txt 理解组件 API、示例和设计规范，并优先结合项目当前 antd 版本与既有写法。
-- 外部服务请求统一放在 `web/src/services/api/`，由浏览器前端直连，不假设存在项目后端。
+- 前端业务 API 请求统一放在 `web/src/services/api/`；账户、会话和后续持久化请求通过同源 `/api` 访问 `server/`，AI 模型渠道请求当前仍由浏览器前端直连。
+- 项目后端放在 `server/`，使用 Fastify、Better Auth、Drizzle 和 PostgreSQL；数据库结构必须使用显式 migration，不要在服务启动时用 ORM 自动推断建表。
 - 全局或跨页面状态优先放在 `web/src/stores/`。
 - 已经放在全局 store 或全局 hook 中的状态/动作，组件需要时直接使用对应 store/hook，不要为了“纯组件”层层透传 props；避免一个组件传递过多参数。
 - 全局组件、全局常量、全局配置等全局性质的内容不要作为 props 或参数层层传递；哪里需要就在哪里直接从对应全局入口获取。
@@ -81,6 +82,7 @@
 ## 项目注意事项
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，不要在文档中误写成已支持云同步。
+- 当前账户服务只完成邮箱注册登录、Session 与 sub2api OIDC Client；sub2api Provider 和画布、素材、生成记录的服务端迁移完成前，不要宣称已支持 sub2api SSO 或账户数据同步。
 - 当前 AI API Key 存在浏览器本地，并由前端直接请求 OpenAI 兼容接口；涉及安全说明时要写清楚。
 - Docker 静态资源路径目前仍是待办项，文档中不要过度承诺生产部署已经完全验证。
 - Agent 对话消息必须同时按 `threadId`、`turnId` 和 `itemId` 归属；实时事件只用于补充未物化的 turn，历史快照成为权威后不得重复合并同一条消息。

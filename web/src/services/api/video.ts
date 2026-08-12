@@ -5,8 +5,10 @@ import i18n from "@/i18n";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
+import { isVideoReferenceAssetUrl, uploadVideoReferenceAsset } from "@/services/video-reference-assets";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
-import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { activeUniArtReferenceCounts, resolveUniArtReferenceLimits, resolveUniArtVideoParams, uniArtVideoSubmissionError } from "@/lib/uniart-video";
+import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, videoCapabilityOf, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -64,6 +66,9 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
+    if (videoCapabilityOf(config, selectedModel)) {
+        return createCapabilityVideoTask(config, requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
+    }
     if (isSeedanceVideoConfig(requestConfig)) {
         return createSeedanceTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
     }
@@ -71,6 +76,80 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
         throw new Error(apiText("videoReferencesUnsupported"));
     }
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+}
+
+async function createCapabilityVideoTask(config: AiConfig, requestConfig: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const capability = videoCapabilityOf(config, model);
+    if (!capability) throw new Error(apiText("videoTaskCreateFailed"));
+    const limits = resolveUniArtReferenceLimits(capability, config.videoReferenceMode);
+    const submissionError = uniArtVideoSubmissionError(limits, prompt, activeUniArtReferenceCounts(limits, { images: references.length, videos: videoReferences.length, audios: audioReferences.length }));
+    if (submissionError) throw new Error(submissionError);
+    const params = resolveUniArtVideoParams(capability, { seconds: config.videoSeconds, ratio: config.size, resolution: config.vquality });
+    const content = await buildCapabilityVideoContent(limits.mode, prompt, references.slice(0, limits.maxImages), videoReferences.slice(0, limits.maxVideos), audioReferences.slice(0, limits.maxAudios), options);
+    const payload = {
+        model: modelOptionName(model),
+        content,
+        duration: params.seconds,
+        resolution: params.resolution,
+        ratio: params.ratio,
+        generate_audio: capability.supportsGenerateAudio === false ? false : boolConfig(config.videoGenerateAudio, true),
+        return_last_frame: false,
+    };
+    try {
+        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(requestConfig, "/videos"), payload, { headers: aiHeaders(requestConfig, "application/json"), signal: options?.signal })).data);
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "openai", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function buildCapabilityVideoContent(mode: ReturnType<typeof resolveUniArtReferenceLimits>["mode"], prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions) {
+    const content: Array<Record<string, unknown>> = [];
+    if (prompt.trim()) content.push({ type: "text", text: prompt.trim() });
+    if (mode === "text_to_video") return content;
+    const imageUrls = await Promise.all(references.map((reference) => resolveCapabilityImageUrl(reference, options)));
+    if (mode === "first_last_frames") {
+        if (imageUrls[0]) content.push({ type: "image_url", image_url: { url: imageUrls[0] }, role: "first_frame" });
+        if (imageUrls[1]) content.push({ type: "image_url", image_url: { url: imageUrls[1] }, role: "last_frame" });
+        return content;
+    }
+    if (mode === "image_to_video") {
+        if (imageUrls[0]) content.push({ type: "image_url", image_url: { url: imageUrls[0] }, role: "first_frame" });
+        return content;
+    }
+    imageUrls.forEach((url) => content.push({ type: "image_url", image_url: { url }, role: "reference_image" }));
+    for (const video of videoReferences) content.push({ type: "video_url", video_url: { url: await resolveCapabilityMediaUrl(video, options) }, role: "reference_video" });
+    for (const audio of audioReferences) content.push({ type: "audio_url", audio_url: { url: await resolveCapabilityMediaUrl(audio, options) }, role: "reference_audio" });
+    return content;
+}
+
+async function resolveCapabilityImageUrl(image: ReferenceImage, options?: RequestOptions) {
+    const directUrl = image.url || image.dataUrl;
+    if (isVideoReferenceAssetUrl(directUrl)) return directUrl;
+    let dataUrl = "";
+    try {
+        dataUrl = await imageToDataUrl(image);
+    } catch {
+        if (isPublicMediaUrl(directUrl)) return directUrl;
+    }
+    if (!dataUrl) throw new Error(apiText("referenceImageReadFailed"));
+    const file = dataUrlToFile({ ...image, dataUrl });
+    return (await uploadVideoReferenceAsset(file, options?.signal)).url;
+}
+
+async function resolveCapabilityMediaUrl(reference: ReferenceVideo | ReferenceAudio, options?: RequestOptions) {
+    if (isVideoReferenceAssetUrl(reference.url)) return reference.url;
+    let blob: Blob | null = reference.storageKey ? await getMediaBlob(reference.storageKey) : null;
+    if (!blob && reference.url) {
+        try {
+            blob = await (await fetch(reference.url, { signal: options?.signal })).blob();
+        } catch {
+            if (isPublicMediaUrl(reference.url)) return reference.url;
+        }
+    }
+    if (!blob) throw new Error(reference.type.startsWith("audio/") ? apiText("invalidReferenceAudio") : apiText("invalidReferenceVideo"));
+    return (await uploadVideoReferenceAsset(new File([blob], reference.name || "reference", { type: blob.type || reference.type }), options?.signal)).url;
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {

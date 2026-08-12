@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Infinite Canvas backup and restore verification
+
+[Timer]
+OnCalendar=*-*-* 04:10:00 Asia/Shanghai
+RandomizedDelaySec=15m
+Persistent=true
+Unit=infinite-canvas-backup.service
+
+[Install]
+WantedBy=timers.target

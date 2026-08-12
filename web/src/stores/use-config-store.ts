@@ -4,14 +4,37 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { modelCapabilityCatalogEntry, type ModelCapabilityAdapter } from "@/lib/model-capability-catalog";
 
 export type ApiCallFormat = "openai" | "gemini" | "ark";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
+export type VideoReferenceMode = "text_to_video" | "image_to_video" | "image_reference" | "first_last_frames" | "omni_reference";
+export type VideoCapabilityModeId = "text_to_video" | "image_to_video" | "image_reference" | "first_last_frame" | "omni_reference";
+export type VideoCapability = {
+    modes: Array<{ id: VideoCapabilityModeId; inputTypes: Array<"text" | "image" | "video" | "audio"> }>;
+    resolutions?: string[];
+    ratios?: string[];
+    durations?: number[];
+    defaultResolution?: string;
+    defaultRatio?: string;
+    defaultDuration?: number;
+    maxReferenceImages?: number;
+    maxReferenceVideos?: number;
+    maxReferenceAudios?: number;
+    supportsGenerateAudio?: boolean;
+};
+export type ImageCapability = {
+    resolutions?: string[];
+    supportsGeneration?: boolean;
+    supportsEdit?: boolean;
+};
 
 export type ChannelModel = {
     name: string;
     capability: ModelCapability;
+    videoCapability?: VideoCapability;
+    imageCapability?: ImageCapability;
     script?: string;
 };
 
@@ -21,6 +44,7 @@ export type ModelChannel = {
     baseUrl: string;
     apiKey: string;
     apiFormat: ApiCallFormat;
+    capabilityAdapter: ModelCapabilityAdapter;
     models: ChannelModel[];
 };
 
@@ -43,6 +67,7 @@ export type AiConfig = {
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
+    videoReferenceMode: VideoReferenceMode;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
     models: string[];
@@ -64,22 +89,23 @@ export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webd
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
-const OPENAI_BASE_URL = "https://api.openai.com";
+const DEFAULT_OPENAI_BASE_URL = "https://api.zgonline.top/";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
+    baseUrl: DEFAULT_OPENAI_BASE_URL,
     apiKey: "",
     apiFormat: "openai",
     channels: [
         {
             id: "default",
             name: i18n.t("config.channels.defaultName"),
-            baseUrl: OPENAI_BASE_URL,
+            baseUrl: DEFAULT_OPENAI_BASE_URL,
             apiKey: "",
             apiFormat: "openai",
+            capabilityAdapter: "uniart",
             models: [
                 { name: "gpt-image-2", capability: "image" },
                 { name: "grok-imagine-video", capability: "video" },
@@ -101,6 +127,7 @@ export const defaultConfig: AiConfig = {
     vquality: "720",
     videoGenerateAudio: "true",
     videoWatermark: "false",
+    videoReferenceMode: "image_reference",
     systemPrompt: "",
     reasoningEffort: "auto",
     models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
@@ -156,6 +183,14 @@ function findChannelModel(config: AiConfig, value: string): { channel: ModelChan
 
 export function modelCapabilityOf(config: AiConfig, value: string): ModelCapability | undefined {
     return findChannelModel(config, value)?.model.capability;
+}
+
+export function videoCapabilityOf(config: AiConfig, value: string): VideoCapability | undefined {
+    return findChannelModel(config, value)?.model.videoCapability;
+}
+
+export function imageCapabilityOf(config: AiConfig, value: string): ImageCapability | undefined {
+    return findChannelModel(config, value)?.model.imageCapability;
 }
 
 export function modelMatchesCapability(config: AiConfig, value: string, capability?: ModelCapability) {
@@ -246,6 +281,7 @@ export const useConfigStore = create<ConfigStore>()(
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
+                        videoReferenceMode: config.videoReferenceMode || "image_reference",
                         canvasImageCount: config.canvasImageCount || "3",
                     },
                 };
@@ -260,29 +296,96 @@ export function useEffectiveConfig() {
 }
 
 /** Normalize a mixed list of raw model names or model objects into deduped ChannelModel entries. */
-export function normalizeChannelModels(models: Array<string | ChannelModel> | undefined): ChannelModel[] {
+export function normalizeChannelModels(models: Array<string | ChannelModel> | undefined, adapter: ModelCapabilityAdapter = "auto"): ChannelModel[] {
     const seen = new Set<string>();
     const result: ChannelModel[] = [];
     for (const item of models || []) {
         const name = (typeof item === "string" ? item : item?.name || "").trim();
         if (!name || seen.has(name)) continue;
         seen.add(name);
-        const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
+        const catalog = modelCapabilityCatalogEntry(adapter, name);
+        const capability = catalog?.capability || (typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name));
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        const storedVideoCapability = typeof item === "string" ? undefined : item.videoCapability;
+        const storedImageCapability = typeof item === "string" ? undefined : item.imageCapability;
+        const videoCapability = normalizeVideoCapability((catalog?.videoCapability || storedVideoCapability ? { ...catalog?.videoCapability, ...storedVideoCapability } : undefined) as VideoCapability | undefined);
+        const imageCapability = normalizeImageCapability((catalog?.imageCapability || storedImageCapability ? { ...catalog?.imageCapability, ...storedImageCapability } : undefined) as ImageCapability | undefined);
+        result.push({ name, capability, videoCapability, imageCapability, script });
     }
     return result;
 }
 
+export function stripChannelModelCapabilities(models: ChannelModel[]) {
+    return models.map((model) => ({ name: model.name, capability: model.capability, script: model.script }));
+}
+
+export function normalizeVideoCapability(value: VideoCapability | undefined): VideoCapability | undefined {
+    const allowedModes = new Set<VideoCapabilityModeId>(["text_to_video", "image_to_video", "image_reference", "first_last_frame", "omni_reference"]);
+    const allowedInputs = new Set<"text" | "image" | "video" | "audio">(["text", "image", "video", "audio"]);
+    const modes = (Array.isArray(value?.modes) ? value.modes : [])
+        .filter((mode) => allowedModes.has(mode.id))
+        .map((mode) => ({ id: mode.id, inputTypes: Array.from(new Set((Array.isArray(mode.inputTypes) ? mode.inputTypes : []).filter((input) => allowedInputs.has(input)))) }));
+    if (!modes.length) return undefined;
+    const resolutions = normalizeCapabilityStrings(value?.resolutions, true);
+    const ratios = normalizeCapabilityStrings(value?.ratios);
+    const durations = Array.from(new Set((Array.isArray(value?.durations) ? value.durations : []).map(Number).filter((item) => Number.isInteger(item) && item > 0))).sort((left, right) => left - right);
+    const defaultResolution = resolutions.find((item) => item === value?.defaultResolution?.trim().toLowerCase());
+    const defaultRatio = ratios.find((item) => item === value?.defaultRatio?.trim());
+    const defaultDuration = durations.includes(Number(value?.defaultDuration)) ? Number(value?.defaultDuration) : undefined;
+    const maxReferenceImages = normalizePositiveInteger(value?.maxReferenceImages);
+    const maxReferenceVideos = normalizePositiveInteger(value?.maxReferenceVideos);
+    const maxReferenceAudios = normalizePositiveInteger(value?.maxReferenceAudios);
+    return {
+        modes,
+        ...(resolutions.length ? { resolutions } : {}),
+        ...(ratios.length ? { ratios } : {}),
+        ...(durations.length ? { durations } : {}),
+        ...(defaultResolution ? { defaultResolution } : {}),
+        ...(defaultRatio ? { defaultRatio } : {}),
+        ...(defaultDuration ? { defaultDuration } : {}),
+        ...(maxReferenceImages ? { maxReferenceImages } : {}),
+        ...(maxReferenceVideos ? { maxReferenceVideos } : {}),
+        ...(maxReferenceAudios ? { maxReferenceAudios } : {}),
+        ...(typeof value?.supportsGenerateAudio === "boolean" ? { supportsGenerateAudio: value.supportsGenerateAudio } : {}),
+    };
+}
+
+export function normalizeImageCapability(value: ImageCapability | undefined): ImageCapability | undefined {
+    if (!value) return undefined;
+    const resolutions = normalizeCapabilityStrings(value.resolutions, true);
+    const supportsGeneration = typeof value.supportsGeneration === "boolean" ? value.supportsGeneration : undefined;
+    const supportsEdit = typeof value.supportsEdit === "boolean" ? value.supportsEdit : undefined;
+    if (!resolutions.length && supportsGeneration === undefined && supportsEdit === undefined) return undefined;
+    return {
+        ...(resolutions.length ? { resolutions } : {}),
+        ...(supportsGeneration !== undefined ? { supportsGeneration } : {}),
+        ...(supportsEdit !== undefined ? { supportsEdit } : {}),
+    };
+}
+
+function normalizeCapabilityStrings(values: string[] | undefined, lowercase = false) {
+    return Array.from(new Set((Array.isArray(values) ? values : []).map((item) => String(item || "").trim()).filter(Boolean).map((item) => (lowercase ? item.toLowerCase() : item))));
+}
+
+function normalizePositiveInteger(value: unknown) {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
 export function createModelChannel(channel?: Partial<ModelChannel>): ModelChannel {
     const apiFormat = normalizeApiFormat(channel?.apiFormat);
+    const baseUrl = channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat);
+    const ownCapabilityEndpoint = isUniArtManagedBaseUrl(baseUrl);
+    const capabilityAdapter = ownCapabilityEndpoint && channel?.capabilityAdapter !== "auto" ? "uniart" : "auto";
+    const models = channel?.capabilityAdapter === "uniart" && !ownCapabilityEndpoint ? stripChannelModelCapabilities(normalizeChannelModels(channel.models)) : channel?.models;
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
+        baseUrl,
         apiKey: channel?.apiKey || "",
         apiFormat,
-        models: normalizeChannelModels(channel?.models),
+        capabilityAdapter,
+        models: normalizeChannelModels(models, capabilityAdapter),
     };
 }
 
@@ -373,7 +476,19 @@ function normalizeChannels(config: AiConfig) {
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
     if (apiFormat === "gemini") return GEMINI_BASE_URL;
     if (apiFormat === "ark") return ARK_BASE_URL;
-    return OPENAI_BASE_URL;
+    return DEFAULT_OPENAI_BASE_URL;
+}
+
+function isUniArtManagedBaseUrl(baseUrl: string) {
+    try {
+        return new URL(baseUrl).hostname.toLowerCase() === "api.zgonline.top";
+    } catch {
+        return false;
+    }
+}
+
+export function isUniArtCapabilityBaseUrl(baseUrl: string) {
+    return isUniArtManagedBaseUrl(baseUrl);
 }
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {

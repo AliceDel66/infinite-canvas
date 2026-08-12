@@ -1,11 +1,146 @@
 services:
-  app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
-    container_name: infinite-canvas
-    ports:
-      - "3000:3000"
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-infinite_canvas}
+      POSTGRES_USER: ${POSTGRES_USER:-infinite_canvas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ${POSTGRES_DATA_PATH:-postgres-data}:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-infinite_canvas} -d ${POSTGRES_DB:-infinite_canvas}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
-    # 统计分析（可选，默认关闭）。每家一个独立变量，填了谁就启用谁，可同时启用多家：
-    # environment:
-    #   ANALYTICS_GA4_ID: G-XXXXXXXXXX                    # Google Analytics 4 衡量 ID
-    #   ANALYTICS_BAIDU_ID: xxxxxxxxxxxxxxxxxxxxxxxxxxxx   # 百度统计站点 ID
+
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - ${MINIO_DATA_PATH:-minio-data}:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set canvas http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "canvas/$$S3_BUCKET" &&
+        (mc admin user info canvas "$$S3_ACCESS_KEY_ID" >/dev/null 2>&1 || mc admin user add canvas "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY") &&
+        mc admin policy attach canvas readwrite --user "$$S3_ACCESS_KEY_ID" &&
+        mc version enable "canvas/$$S3_BUCKET"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+      S3_BUCKET: ${S3_BUCKET:-infinite-canvas}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID in .env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY in .env}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"
+
+  migrate:
+    image: ${API_IMAGE_REPOSITORY:-infinite-canvas-api}:${IMAGE_TAG:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    command: ["node", "dist/migrate.js"]
+    environment: &api-environment
+      NODE_ENV: production
+      PORT: 3002
+      DATABASE_URL: postgres://${POSTGRES_USER:-infinite_canvas}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-infinite_canvas}
+      APP_ORIGINS: ${APP_ORIGINS:-http://localhost:3000}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-infinite-canvas}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID in .env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY in .env}
+      S3_FORCE_PATH_STYLE: "true"
+      IMPORT_MAX_DOMAIN_BYTES: ${IMPORT_MAX_DOMAIN_BYTES:-16777216}
+      IMPORT_MAX_FILE_BYTES: ${IMPORT_MAX_FILE_BYTES:-268435456}
+      IMPORT_MAX_TOTAL_BYTES: ${IMPORT_MAX_TOTAL_BYTES:-21474836480}
+      SUB2API_OIDC_DISCOVERY_URL: ${SUB2API_OIDC_DISCOVERY_URL:-}
+      SUB2API_CLIENT_ID: ${SUB2API_CLIENT_ID:-}
+      SUB2API_CLIENT_SECRET: ${SUB2API_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"
+
+  api:
+    image: ${API_IMAGE_REPOSITORY:-infinite-canvas-api}:${IMAGE_TAG:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    environment: *api-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [edge, backend]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  app:
+    image: ${WEB_IMAGE_REPOSITORY:-infinite-canvas-web}:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - ${APP_BIND_HOST:-127.0.0.1}:${APP_PORT:-3000}:3000
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      ANALYTICS_GA4_ID: ${ANALYTICS_GA4_ID:-}
+      ANALYTICS_BAIDU_ID: ${ANALYTICS_BAIDU_ID:-}
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  minio-client:
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    profiles: [operations]
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      MC_HOST_canvas: http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000
+    volumes:
+      - ${BACKUP_ROOT:-/data/backups/infinite-canvas}:/backups
+    networks: [backend]
+
+volumes:
+  postgres-data:
+  minio-data:
+
+networks:
+  edge:
+  backend:
+    internal: true

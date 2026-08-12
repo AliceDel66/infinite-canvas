@@ -1,26 +1,14 @@
 import { ArrowRight } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { App, Button, Image, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
-import { Trans, useTranslation } from "react-i18next";
+import { useTranslation } from "react-i18next";
 
+import { BrandMark } from "@/components/brand/brand-mark";
 import { fetchPrompts, type Prompt } from "@/services/api/prompts";
 import { navigationTools } from "@/constant/navigation-tools";
 import i18n from "@/i18n";
 import { cn } from "@/lib/utils";
-
-function Highlighter({ action, color, children }: { action: "highlight" | "underline"; color: string; children?: ReactNode }) {
-    return (
-        <span className="relative inline-block px-1">
-            {action === "highlight" ? (
-                <span className="absolute inset-x-0 bottom-0 top-1 rounded-sm opacity-45" style={{ backgroundColor: color }} />
-            ) : (
-                <span className="absolute inset-x-0 bottom-0 h-1 rounded-full opacity-80" style={{ backgroundColor: color }} />
-            )}
-            <span className="relative font-medium text-stone-800 dark:text-stone-200">{children}</span>
-        </span>
-    );
-}
 
 export default function IndexPage() {
     const { message } = App.useApp();
@@ -28,27 +16,30 @@ export default function IndexPage() {
     const navigate = useNavigate();
     const [primaryTool] = navigationTools;
     const [promptShowcase, setPromptShowcase] = useState<Prompt[]>([]);
+    const [loading, setLoading] = useState(true);
     const [previewIndex, setPreviewIndex] = useState(0);
     const [previewOpen, setPreviewOpen] = useState(false);
 
     useEffect(() => {
         void fetchPrompts({ pageSize: 12 })
             .then((data) => setPromptShowcase(data.items))
-            .catch((error) => message.error(error instanceof Error ? error.message : i18n.t("home.promptError")));
+            .catch((error) => message.error(error instanceof Error ? error.message : i18n.t("home.promptError")))
+            .finally(() => setLoading(false));
     }, [message]);
 
     return (
-        <main className="relative h-full overflow-y-auto bg-background bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:16px_16px] text-stone-950 dark:bg-[radial-gradient(rgba(245,245,244,.18)_1px,transparent_1px)] dark:text-stone-100">
-            <section className="relative mx-auto min-h-[calc(100vh-4rem)] max-w-7xl overflow-hidden px-6">
-                <div className="pointer-events-none absolute left-[15%] top-24 size-20 rounded-full border border-dashed border-stone-200 dark:border-stone-800" />
-                <div className="pointer-events-none absolute right-[23%] top-[48%] size-20 rounded-full border border-dashed border-stone-200 dark:border-stone-800" />
-
-                <div className="relative flex min-h-[620px] flex-col items-center justify-center pt-10 text-center">
-                    <h1 className="ai-title-aurora max-w-5xl text-balance text-5xl font-semibold tracking-normal sm:text-7xl lg:text-8xl">{t("meta.title")}</h1>
-                    <p className="mt-8 max-w-3xl text-balance text-lg leading-8 text-stone-500 dark:text-stone-400">
-                        <Trans i18nKey="home.description" components={{ canvas: <Highlighter action="underline" color="#FF9800" />, content: <Highlighter action="highlight" color="#87CEFA" /> }} />
-                    </p>
-                    <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
+        <main className="relative h-full overflow-y-auto bg-background bg-[radial-gradient(#e7e5e4_1px,transparent_1px)] [background-size:18px_18px] text-stone-950 dark:bg-[radial-gradient(rgba(245,245,244,.14)_1px,transparent_1px)] dark:text-stone-100">
+            <section className="relative mx-auto max-w-7xl overflow-hidden px-4 sm:px-6">
+                <div className="relative flex min-h-[390px] flex-col items-center justify-center border-b border-stone-200 py-12 text-center dark:border-stone-800">
+                    <BrandMark className="size-14" />
+                    <div className="mt-5 flex items-center gap-3 text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                        <span className="h-px w-7 bg-[#ff5d4a]" />
+                        <span>{t("home.eyebrow")}</span>
+                        <span className="h-px w-7 bg-[#20aa9a]" />
+                    </div>
+                    <h1 className="mt-4 max-w-4xl text-balance text-6xl font-semibold sm:text-7xl">{t("meta.title")}</h1>
+                    <p className="mt-5 max-w-2xl text-balance text-base leading-7 text-stone-500 sm:text-lg sm:leading-8 dark:text-stone-400">{t("home.description")}</p>
+                    <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
                         <Button type="primary" size="large" onClick={() => navigate(`/${primaryTool.slug}`)} icon={<ArrowRight className="size-4" />} iconPlacement="end">
                             {t("home.start")}
                         </Button>
@@ -58,18 +49,33 @@ export default function IndexPage() {
                     </div>
                 </div>
 
-                <section className="relative mx-auto mb-20 max-w-6xl border-t border-stone-200 pt-12 dark:border-stone-800">
-                    <div className="mb-8 grid gap-4 md:grid-cols-[1fr_auto_1fr] md:items-start">
-                        <div />
-                        <div className="max-w-2xl text-center">
-                            <h2 className="text-3xl font-semibold text-stone-950 dark:text-stone-100">{t("home.showcaseTitle")}</h2>
-                            <p className="mt-3 text-base leading-7 text-stone-500 dark:text-stone-400">{t("home.showcaseDescription")}</p>
+                <nav className="hide-scrollbar flex overflow-x-auto border-b border-stone-200 dark:border-stone-800" aria-label={t("topNav.menu")}>
+                    {navigationTools.map((tool) => {
+                        const Icon = tool.icon;
+                        return (
+                            <button key={tool.slug} type="button" onClick={() => navigate(`/${tool.slug}`)} className="flex h-16 min-w-36 flex-1 items-center justify-center gap-2 border-r border-stone-200 px-4 text-sm font-medium text-stone-500 transition hover:bg-black/[0.03] hover:text-stone-950 last:border-r-0 dark:border-stone-800 dark:text-stone-400 dark:hover:bg-white/[0.04] dark:hover:text-stone-100">
+                                <Icon className="size-4" />
+                                <span>{t(`navigation.${tool.slug}`)}</span>
+                            </button>
+                        );
+                    })}
+                </nav>
+
+                <section className="relative mx-auto mb-20 max-w-6xl pt-10">
+                    <div className="mb-7 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+                        <div className="max-w-2xl">
+                            <div className="text-xs font-semibold text-[#20aa9a]">{t("home.showcaseEyebrow")}</div>
+                            <h2 className="mt-2 text-2xl font-semibold text-stone-950 sm:text-3xl dark:text-stone-100">{t("home.showcaseTitle")}</h2>
+                            <p className="mt-2 text-sm leading-6 text-stone-500 sm:text-base sm:leading-7 dark:text-stone-400">{t("home.showcaseDescription")}</p>
                         </div>
-                        <Button type="link" onClick={() => navigate("/prompts")} className="justify-self-center md:justify-self-end" icon={<ArrowRight className="size-4" />} iconPlacement="end">
+                        <Button type="link" onClick={() => navigate("/prompts")} className="w-fit px-0" icon={<ArrowRight className="size-4" />} iconPlacement="end">
                             {t("home.viewPrompts")}
                         </Button>
                     </div>
                     <div className="grid auto-rows-[210px] gap-4 md:grid-cols-4">
+                        {loading
+                            ? Array.from({ length: 6 }, (_, index) => <div key={index} className={cn("animate-pulse rounded-md border border-stone-200 bg-stone-100 dark:border-stone-800 dark:bg-stone-900", index === 0 && "md:col-span-2 md:row-span-2", index === 3 && "md:col-span-2")} />)
+                            : null}
                         {promptShowcase.map((item, index) => (
                             <button
                                 key={item.id}
@@ -79,7 +85,7 @@ export default function IndexPage() {
                                     setPreviewOpen(true);
                                 }}
                                 className={cn(
-                                    "group relative cursor-pointer overflow-hidden border border-stone-200 bg-stone-100 text-left dark:border-stone-800 dark:bg-stone-900",
+                                    "group relative cursor-pointer overflow-hidden rounded-md border border-stone-200 bg-stone-100 text-left dark:border-stone-800 dark:bg-stone-900",
                                     index === 0 && "md:col-span-2 md:row-span-2",
                                     index === 3 && "md:col-span-2",
                                 )}

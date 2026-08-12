@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up Infinite Canvas PostgreSQL and object storage
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/infinite-canvas-deploy
+ExecStart=/opt/infinite-canvas-deploy/deploy/backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

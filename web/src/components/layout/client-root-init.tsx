@@ -3,8 +3,10 @@ import { useEffect, useRef } from "react";
 import { App } from "antd";
 import { useTranslation } from "react-i18next";
 
-import { createModelChannel, useConfigStore } from "@/stores/use-config-store";
+import { createModelChannel, isUniArtCapabilityBaseUrl, stripChannelModelCapabilities, useConfigStore } from "@/stores/use-config-store";
 import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
+import { useUserStore } from "@/stores/use-user-store";
+import { AccountDataImport } from "@/components/auth/account-data-import";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -13,8 +15,13 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const config = useConfigStore((state) => state.config);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    const initializeSession = useUserStore((state) => state.initializeSession);
 
     usePromptSourceScheduler();
+
+    useEffect(() => {
+        void initializeSession();
+    }, [initializeSession]);
 
     useEffect(() => {
         if (handledConfigParams.current) return;
@@ -34,11 +41,15 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
             firstChannel
                 ? config.channels.map((channel, index) =>
                       index === 0
-                          ? {
+                          ? createModelChannel({
                                 ...channel,
-                                ...(baseUrl ? { baseUrl } : {}),
+                                ...(baseUrl ? { baseUrl, capabilityAdapter: isUniArtCapabilityBaseUrl(baseUrl) ? "uniart" : "auto" } : {}),
                                 ...(apiKey ? { apiKey } : {}),
-                            }
+                                models:
+                                    baseUrl && !isUniArtCapabilityBaseUrl(baseUrl)
+                                        ? stripChannelModelCapabilities(channel.models)
+                                        : channel.models,
+                            })
                           : channel,
                   )
                 : [createModelChannel({ id: "default", name: t("config.channels.defaultName"), baseUrl: baseUrl || undefined, apiKey: apiKey || "" })],
@@ -49,5 +60,10 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         message.success(t("config.importedDirectConfig"));
     }, [config.channels, message, openConfigDialog, t, updateConfig]);
 
-    return <>{children}</>;
+    return (
+        <>
+            {children}
+            <AccountDataImport />
+        </>
+    );
 }

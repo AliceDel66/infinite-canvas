@@ -9,16 +9,17 @@ import { useTranslation } from "react-i18next";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
-import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
+import { VideoReferenceModeSelector, VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoResolutionLabel, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS, SEEDANCE_VIDEO_MIME_TYPES } from "@/lib/seedance-video";
+import { activeUniArtReferenceCounts, resolveUniArtReferenceLimits, resolveUniArtVideoParams, uniArtVideoSubmissionError } from "@/lib/uniart-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, useConfigStore, useEffectiveConfig, videoCapabilityOf, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -63,19 +64,22 @@ type GenerationLog = {
     error?: string;
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoReferenceMode">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
-const LOG_STORE_KEY = "infinite-canvas:video_generation_logs";
+const ACTIVE_LOG_KEY = "video";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+const sessionStore = localforage.createInstance({ name: "infinite-canvas", storeName: "workbench_sessions" });
+const activeCreationIds = new Set<string>();
+const activePollingIds = new Set<string>();
 
 export default function VideoPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const fileInputTargetRef = useRef<"all" | "image" | "video" | "audio">("all");
     const dragDepthRef = useRef(0);
-    const activeLogIdsRef = useRef<Set<string>>(new Set());
     const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -103,29 +107,36 @@ export default function VideoPage() {
     const videoCommand = useWorkbenchAgentStore((state) => state.videoCommand);
     const clearVideoCommand = useWorkbenchAgentStore((state) => state.clearVideoCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const processedCommandRef = useRef(0);
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
-    const canGenerate = Boolean(prompt.trim());
+    const videoCapability = videoCapabilityOf(effectiveConfig, model);
+    const referenceLimits = videoReferenceLimitsForConfig(effectiveConfig);
+    const submissionError = videoCapability ? uniArtVideoSubmissionError(referenceLimits, prompt, activeUniArtReferenceCounts(referenceLimits, { images: references.length, videos: videoReferences.length, audios: audioReferences.length })) : prompt.trim() ? null : t("videoWorkbench.promptRequired");
+    const canGenerate = !submissionError;
 
     useEffect(() => {
         if (!running || !startedAt) return;
-        const timer = window.setInterval(() => setElapsedMs(performance.now() - startedAt), 1000);
+        const timer = window.setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
         return () => window.clearInterval(timer);
     }, [running, startedAt]);
 
-    useEffect(() => {
-        void refreshLogs();
-    }, []);
+    const openReferenceUpload = (target: "image" | "video" | "audio") => {
+        fileInputTargetRef.current = target;
+        if (!fileInputRef.current) return;
+        fileInputRef.current.accept = target === "image" ? "image/*" : target === "video" ? "video/mp4,video/quicktime" : "audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav";
+        fileInputRef.current.click();
+    };
 
-    const addReferences = async (files?: FileList | null) => {
+    const addReferences = async (files?: FileList | null, target: "all" | "image" | "video" | "audio" = "all") => {
         const selectedFiles = Array.from(files || []);
         const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/") && !SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && !isSupportedAudioFile(file));
         if (unsupported.length) message.warning(t("videoWorkbench.unsupportedFiles"));
-        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length);
-        const videoFiles = selectedFiles.filter((file) => SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.videos - videoReferences.length);
-        const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.audios - audioReferences.length);
+        const imageFiles = target === "all" || target === "image" ? selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, Math.max(0, referenceLimits.maxImages - references.length)) : [];
+        const videoFiles = target === "all" || target === "video" ? selectedFiles.filter((file) => SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, Math.max(0, referenceLimits.maxVideos - videoReferences.length)) : [];
+        const audioFiles = target === "all" || target === "audio" ? selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, Math.max(0, referenceLimits.maxAudios - audioReferences.length)) : [];
         if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes)) message.warning(t("videoWorkbench.imageTooLarge"));
         if (selectedFiles.some((file) => SEEDANCE_VIDEO_MIME_TYPES.includes(file.type) && file.size > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes)) message.warning(t("videoWorkbench.videoTooLarge"));
         if (selectedFiles.some((file) => isSupportedAudioFile(file) && file.size > SEEDANCE_REFERENCE_LIMITS.audioMaxBytes)) message.warning(t("videoWorkbench.audioTooLarge"));
@@ -151,9 +162,9 @@ export default function VideoPage() {
             ),
             message.warning,
         );
-        setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
-        setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
-        setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.audios));
+        setReferences((value) => [...value, ...nextReferences].slice(0, referenceLimits.maxImages));
+        setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, referenceLimits.maxVideos));
+        setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, referenceLimits.maxAudios));
     };
 
     const handleReferenceDragEnter = (event: DragEvent<HTMLDivElement>, target: "image" | "video" | "audio") => {
@@ -172,7 +183,7 @@ export default function VideoPage() {
         event.preventDefault();
         dragDepthRef.current = 0;
         setReferenceDragTarget(null);
-        void addReferences(event.dataTransfer.files);
+        void addReferences(event.dataTransfer.files, referenceDragTarget || "all");
     };
 
     const addReferencesFromClipboard = async () => {
@@ -184,12 +195,12 @@ export default function VideoPage() {
                 return;
             }
             const nextReferences = await Promise.all(
-                blobs.slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length).map(async (blob, index) => {
+                blobs.slice(0, Math.max(0, referenceLimits.maxImages - references.length)).map(async (blob, index) => {
                     const image = await uploadImage(blob);
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
-            setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            setReferences((value) => [...value, ...nextReferences].slice(0, referenceLimits.maxImages));
             message.success(t("videoWorkbench.clipboardAdded", { count: nextReferences.length }));
         } catch {
             message.error(t("videoWorkbench.clipboardEmpty"));
@@ -203,25 +214,37 @@ export default function VideoPage() {
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: t("videoWorkbench.invalidParams") });
             return;
         }
+        const batchStartedAt = performance.now();
+        const pendingLog = buildLog({ prompt: snapshot.text, model: snapshot.model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "pending" });
+        activeCreationIds.add(pendingLog.id);
         setElapsedMs(0);
         setRunning(true);
+        setStartedAt(pendingLog.createdAt);
+        setPreviewLog(pendingLog);
+        setResults([{ id: pendingLog.id, status: "pending" }]);
         if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
-        setPreviewLog(null);
-        setResults([{ id: nanoid(), status: "pending" }]);
-        const batchStartedAt = performance.now();
-        setStartedAt(batchStartedAt);
+        await Promise.all([logStore.setItem(pendingLog.id, serializeLog(pendingLog)), sessionStore.setItem(ACTIVE_LOG_KEY, pendingLog.id)]);
+        await refreshLogs(false);
         try {
             const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences);
-            const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "pending", task });
-            await saveLog(log, false);
-            void pollGenerationLog(log, snapshot.config, agentTaskId);
+            const runningLog = { ...pendingLog, task };
+            setPreviewLog((current) => (current?.id === runningLog.id ? runningLog : current));
+            await saveLog(runningLog, false);
+            void pollGenerationLog(runningLog, snapshot.config, agentTaskId);
+            activeCreationIds.delete(pendingLog.id);
         } catch (error) {
+            activeCreationIds.delete(pendingLog.id);
             const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
             setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
-            await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "failed", error: errorMessage }));
+            const failedLog = { ...pendingLog, durationMs: performance.now() - batchStartedAt, status: "failed" as const, error: errorMessage };
+            setPreviewLog((current) => (current?.id === failedLog.id ? failedLog : current));
+            await saveLog(failedLog);
             message.error(errorMessage);
-            setRunning(false);
+            if (!activeCreationIds.size && !activePollingIds.size) {
+                setRunning(false);
+                setStartedAt(0);
+            }
         }
     };
 
@@ -249,21 +272,33 @@ export default function VideoPage() {
 
     const buildRequestSnapshot = () => {
         const text = prompt.trim();
-        if (!text) {
-            message.error(t("videoWorkbench.promptRequired"));
+        const latestConfig = { ...useConfigStore.getState().config, channelMode: "local" as const };
+        const latestModel = latestConfig.videoModel || latestConfig.model;
+        const latestCapability = videoCapabilityOf(latestConfig, latestModel);
+        const latestLimits = videoReferenceLimitsForConfig(latestConfig);
+        const latestSubmissionError = latestCapability ? uniArtVideoSubmissionError(latestLimits, text, activeUniArtReferenceCounts(latestLimits, { images: references.length, videos: videoReferences.length, audios: audioReferences.length })) : text ? null : t("videoWorkbench.promptRequired");
+        if (latestSubmissionError) {
+            message.error(latestSubmissionError);
             return null;
         }
-        if (!isAiConfigReady(effectiveConfig, model)) {
+        if (!isAiConfigReady(latestConfig, latestModel)) {
             message.warning(t("workbench.configFirst"));
             openConfigDialog(true);
             return null;
         }
-        const videoReferenceError = seedanceVideoReferenceError(videoReferences);
+        const videoReferenceError = isSeedanceVideoConfig({ ...latestConfig, model: latestModel }) ? seedanceVideoReferenceError(videoReferences) : null;
         if (videoReferenceError) {
             message.error(t("videoWorkbench.referenceError", { error: videoReferenceError, hint: seedanceVideoReferenceHint() }));
             return null;
         }
-        return { text, config: buildVideoConfig(effectiveConfig, model), references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
+        return {
+            text,
+            model: latestModel,
+            config: buildVideoConfig(latestConfig, latestModel),
+            references: references.slice(0, latestLimits.maxImages),
+            videoReferences: videoReferences.slice(0, latestLimits.maxVideos),
+            audioReferences: audioReferences.slice(0, latestLimits.maxAudios),
+        };
     };
 
     const retryResult = () => {
@@ -292,14 +327,15 @@ export default function VideoPage() {
             setPrompt(payload.content);
         } else if (payload.kind === "image") {
             const stored = await uploadImage(payload.dataUrl);
-            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, referenceLimits.maxImages));
         } else if (payload.kind === "video") {
-            setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
+            setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, referenceLimits.maxVideos));
         }
         setAssetPickerOpen(false);
     };
 
     const createSession = () => {
+        void sessionStore.removeItem(ACTIVE_LOG_KEY);
         setPrompt("");
         setReferences([]);
         setVideoReferences([]);
@@ -318,6 +354,7 @@ export default function VideoPage() {
             .filter((key): key is string => Boolean(key));
         void Promise.all([deleteStoredMedia(mediaKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(() => refreshLogs());
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
+            void sessionStore.removeItem(ACTIVE_LOG_KEY);
             setPreviewLog(null);
             setResults([]);
         }
@@ -344,10 +381,10 @@ export default function VideoPage() {
     };
 
     const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig, agentTaskId?: string) => {
-        if (!log.task || activeLogIdsRef.current.has(log.id)) return;
-        activeLogIdsRef.current.add(log.id);
+        if (!log.task || activePollingIds.has(log.id)) return;
+        activePollingIds.add(log.id);
         setRunning(true);
-        setStartedAt((value) => value || performance.now());
+        setStartedAt((value) => value || log.createdAt);
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
         const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
         try {
@@ -367,7 +404,9 @@ export default function VideoPage() {
                     };
                     setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
                     if (agentTaskId) updateAgentTask(agentTaskId, { status: "succeeded", successCount: 1, failCount: 0, error: undefined });
-                    await saveLog({ ...log, status: "success", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
+                    const completedLog = { ...log, status: "success" as const, durationMs: nextVideo.durationMs, video: nextVideo, error: undefined };
+                    setPreviewLog((current) => (current?.id === completedLog.id ? completedLog : current));
+                    await saveLog(completedLog);
                     message.success(t("videoWorkbench.generated"));
                     return;
                 }
@@ -379,18 +418,21 @@ export default function VideoPage() {
             const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
             setResults([{ id: log.id, status: "failed", error: errorMessage }]);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
-            await saveLog({ ...log, status: "failed", durationMs: Date.now() - log.createdAt, error: errorMessage });
+            const failedLog = { ...log, status: "failed" as const, durationMs: Date.now() - log.createdAt, error: errorMessage };
+            setPreviewLog((current) => (current?.id === failedLog.id ? failedLog : current));
+            await saveLog(failedLog);
             message.error(errorMessage);
         } finally {
-            activeLogIdsRef.current.delete(log.id);
-            if (!activeLogIdsRef.current.size) {
+            activePollingIds.delete(log.id);
+            if (!activeCreationIds.size && !activePollingIds.size) {
                 setRunning(false);
                 setStartedAt(0);
             }
         }
     };
 
-    const previewGenerationLog = (log: GenerationLog) => {
+    const previewGenerationLog = (log: GenerationLog, persistSelection = true) => {
+        if (persistSelection) void sessionStore.setItem(ACTIVE_LOG_KEY, log.id);
         setPreviewLog(log);
         setLogsOpen(false);
         setPrompt(log.prompt);
@@ -403,8 +445,51 @@ export default function VideoPage() {
         if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
+        if (log.config.videoReferenceMode) updateConfig("videoReferenceMode", log.config.videoReferenceMode);
         setResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
     };
+
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            const activeLogId = (await sessionStore.getItem<string>(ACTIVE_LOG_KEY)) || Array.from(activeCreationIds).at(-1) || Array.from(activePollingIds).at(-1);
+            const nextLogs = await readStoredLogs();
+            if (cancelled) return;
+            setLogs(nextLogs);
+            resumePendingLogs(nextLogs);
+            const activeLog = nextLogs.find((log) => log.id === activeLogId);
+            if (activeLog) previewGenerationLog(activeLog, false);
+            const runningLog = nextLogs.find((log) => log.status === "pending" && (Boolean(log.task) || activeCreationIds.has(log.id)));
+            if (runningLog) {
+                setRunning(true);
+                setStartedAt(runningLog.createdAt);
+                setElapsedMs(Math.max(0, Date.now() - runningLog.createdAt));
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+        // Restore once; pending remote tasks are resumed by resumePendingLogs.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        if (!running) return;
+        const timer = window.setInterval(() => {
+            void readStoredLogs().then((nextLogs) => {
+                setLogs(nextLogs);
+                const currentLog = nextLogs.find((log) => log.id === previewLog?.id);
+                if (currentLog && currentLog.status !== previewLog?.status) previewGenerationLog(currentLog, false);
+                if (!activeCreationIds.size && !activePollingIds.size && !nextLogs.some((log) => log.status === "pending" && log.task)) {
+                    setRunning(false);
+                    setStartedAt(0);
+                }
+            });
+        }, 1000);
+        return () => window.clearInterval(timer);
+        // previewGenerationLog intentionally follows the selected persisted task.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [running, previewLog?.id, previewLog?.status]);
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
@@ -443,14 +528,16 @@ export default function VideoPage() {
                                 <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder={t("videoWorkbench.promptPlaceholder")} />
                             </div>
 
-                            <div className="min-w-0">
+                            <VideoReferenceModeSelector config={effectiveConfig} model={model} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} />
+
+                            {referenceLimits.maxImages > 0 ? <div className="min-w-0">
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">{t("videoWorkbench.references")}</span>
                                     <div className="flex gap-2">
                                         <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
                                             {t("workbench.clipboard")}
                                         </Button>
-                                        <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                        <Button size="small" icon={<Upload className="size-3.5" />} disabled={references.length >= referenceLimits.maxImages} onClick={() => openReferenceUpload("image")}>
                                             {t("workbench.upload")}
                                         </Button>
                                     </div>
@@ -477,12 +564,12 @@ export default function VideoPage() {
                                     ))}
                                     {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceDragTarget === "image" ? t("videoWorkbench.dropReferences") : t("videoWorkbench.noImages")}</div> : null}
                                 </div>
-                            </div>
+                            </div> : null}
 
-                            <div className="min-w-0">
+                            {referenceLimits.maxVideos > 0 ? <div className="min-w-0">
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">{t("videoWorkbench.videoReferences")}</span>
-                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                    <Button size="small" icon={<Upload className="size-3.5" />} disabled={videoReferences.length >= referenceLimits.maxVideos} onClick={() => openReferenceUpload("video")}>
                                         {t("workbench.upload")}
                                     </Button>
                                 </div>
@@ -508,12 +595,12 @@ export default function VideoPage() {
                                     ))}
                                     {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceDragTarget === "video" ? t("videoWorkbench.dropReferences") : t("videoWorkbench.noVideos")}</div> : null}
                                 </div>
-                            </div>
+                            </div> : null}
 
-                            <div className="min-w-0">
+                            {referenceLimits.maxAudios > 0 ? <div className="min-w-0">
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">{t("videoWorkbench.audioReferences")}</span>
-                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                    <Button size="small" icon={<Upload className="size-3.5" />} disabled={audioReferences.length >= referenceLimits.maxAudios} onClick={() => openReferenceUpload("audio")}>
                                         {t("workbench.upload")}
                                     </Button>
                                 </div>
@@ -543,11 +630,11 @@ export default function VideoPage() {
                                     ))}
                                     {!audioReferences.length ? <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">{referenceDragTarget === "audio" ? t("videoWorkbench.dropReferences") : t("videoWorkbench.noAudio")}</div> : null}
                                 </div>
-                            </div>
+                            </div> : null}
 
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s
+                                    {modelOptionLabel(effectiveConfig, model)} · {videoResolutionLabel(effectiveConfig.vquality)} · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
                                     {t("workbench.adjust")}
@@ -591,7 +678,8 @@ export default function VideoPage() {
                 multiple
                 className="hidden"
                 onChange={(event) => {
-                    void addReferences(event.target.files);
+                    void addReferences(event.target.files, fileInputTargetRef.current);
+                    fileInputTargetRef.current = "all";
                     event.target.value = "";
                 }}
             />
@@ -623,7 +711,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel config={config} model={model} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} showReferenceModes={false} className="space-y-4" />
             </div>
         </>
     );
@@ -744,7 +832,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                     <div className="mt-2 flex flex-wrap gap-1">
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.size}</Tag>
-                        <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.resolution}p</Tag>
+                        <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{videoResolutionLabel(log.resolution)}</Tag>
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.seconds}s</Tag>
                     </div>
                 </div>
@@ -878,6 +966,7 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         videoSeconds: log.config?.videoSeconds || log.seconds || "",
         videoGenerateAudio: log.config?.videoGenerateAudio || "true",
         videoWatermark: log.config?.videoWatermark || "false",
+        videoReferenceMode: log.config?.videoReferenceMode || "image_reference",
     };
 }
 
@@ -890,6 +979,7 @@ function buildLog({ prompt, model, config, references, videoReferences, audioRef
         videoSeconds: config.videoSeconds,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
+        videoReferenceMode: config.videoReferenceMode,
     };
     return {
         id: nanoid(),
@@ -915,16 +1005,25 @@ function buildLog({ prompt, model, config, references, videoReferences, audioRef
 
 function buildVideoConfig(config: AiConfig, model: string): AiConfig {
     const seedance = isSeedanceVideoConfig({ ...config, model });
+    const capability = videoCapabilityOf(config, model);
+    const capabilityParams = capability ? resolveUniArtVideoParams(capability, { seconds: config.videoSeconds, ratio: config.size, resolution: config.vquality }) : null;
     return {
         ...config,
         model,
         videoModel: model,
-        size: seedance ? normalizeSeedanceRatio(config.size) : normalizeVideoSize(config.size),
-        videoSeconds: normalizeVideoSeconds(config.videoSeconds),
-        vquality: normalizeResolution(config.vquality),
-        videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
+        size: capabilityParams?.ratio || (seedance ? normalizeSeedanceRatio(config.size) : normalizeVideoSize(config.size)),
+        videoSeconds: String(capabilityParams?.seconds || normalizeVideoSeconds(config.videoSeconds)),
+        vquality: capabilityParams?.resolution || normalizeResolution(config.vquality),
+        videoGenerateAudio: String(capability?.supportsGenerateAudio === false ? false : boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
     };
+}
+
+function videoReferenceLimitsForConfig(config: AiConfig) {
+    const model = config.videoModel || config.model;
+    const capability = videoCapabilityOf(config, model);
+    if (capability) return resolveUniArtReferenceLimits(capability, config.videoReferenceMode);
+    return { mode: "image_reference" as const, maxImages: SEEDANCE_REFERENCE_LIMITS.images, maxVideos: SEEDANCE_REFERENCE_LIMITS.videos, maxAudios: SEEDANCE_REFERENCE_LIMITS.audios };
 }
 
 function normalizeVideoSeconds(value: string) {

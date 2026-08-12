@@ -4,12 +4,14 @@ import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { AppConfigModal } from "@/components/layout/app-config-modal";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { useUserStore } from "@/stores/use-user-store";
 
 export function AppTopNav() {
     const { t } = useTranslation();
@@ -22,31 +24,27 @@ export function AppTopNav() {
     const connectAgent = useAgentStore((state) => state.connectAgent);
     const togglePanel = useAgentStore((state) => state.togglePanel);
     const panelOpen = useAgentStore((state) => state.panelOpen);
+    const authenticated = useUserStore((state) => state.status === "authenticated");
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
 
     useEffect(() => {
-        if (autoConnectRef.current || agentEnabled || agentConnected || !agentToken.trim()) return;
+        if (!authenticated || autoConnectRef.current || agentEnabled || agentConnected || !agentToken.trim()) return;
         autoConnectRef.current = true;
         connectAgent({ silent: true });
-    }, [agentConnected, agentEnabled, agentToken, connectAgent]);
+    }, [agentConnected, agentEnabled, agentToken, authenticated, connectAgent]);
 
     return (
         <>
             {!hideHeader ? (
-                <header className="sticky top-0 z-20 h-14 shrink-0 border-b border-stone-200 bg-background/90 backdrop-blur-xl dark:border-stone-800">
-                    <div className="mx-auto flex h-full max-w-7xl items-stretch justify-between gap-5 px-6">
+                <header className="sticky top-0 z-20 h-14 shrink-0 border-b border-stone-200/80 bg-background/95 backdrop-blur-xl dark:border-stone-800">
+                    <div className="mx-auto flex h-full max-w-7xl items-stretch justify-between gap-4 px-4 sm:px-6">
                         <div className="flex min-w-0 items-center">
-                            <Link to="/" className="flex h-full shrink-0 items-center gap-2 text-sm font-semibold leading-none tracking-tight text-stone-950 transition hover:text-stone-600 dark:text-stone-100 dark:hover:text-stone-300">
-                                <span
-                                    className="size-5 shrink-0 bg-current"
-                                    style={{
-                                        mask: "url(/logo.svg) center / contain no-repeat",
-                                        WebkitMask: "url(/logo.svg) center / contain no-repeat",
-                                    }}
-                                />
-                                <span className="text-base font-medium">{t("meta.title")}</span>
+                            <Link to="/" className="flex h-full shrink-0 items-center gap-2.5 text-stone-950 transition hover:opacity-75 dark:text-stone-100">
+                                <BrandMark className="size-6 shrink-0" />
+                                <span className="text-base font-semibold">{t("meta.title")}</span>
+                                <span className="hidden border-l border-stone-200 pl-2.5 text-[11px] font-medium text-stone-400 lg:inline dark:border-stone-700 dark:text-stone-500">{t("meta.shortDescription")}</span>
                             </Link>
 
                             <button
@@ -59,7 +57,7 @@ export function AppTopNav() {
                                 <Menu className="size-5" />
                             </button>
 
-                            <nav className="hide-scrollbar ml-8 hidden h-14 min-w-0 items-center gap-7 overflow-x-auto md:flex">
+                            <nav className="hide-scrollbar ml-7 hidden h-14 min-w-0 items-center gap-6 overflow-x-auto md:flex">
                                 {navigationTools.map((tool) => {
                                     const Icon = tool.icon;
                                     const active = tool.slug === activeToolSlug;
@@ -83,9 +81,11 @@ export function AppTopNav() {
                         </div>
 
                         <div className="my-auto flex h-9 min-w-0 items-center justify-end gap-2 justify-self-end whitespace-nowrap">
-                            <Tooltip title={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
-                                <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Bot className="size-4" />} onClick={togglePanel} aria-label={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")} />
-                            </Tooltip>
+                            {authenticated ? (
+                                <Tooltip title={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
+                                    <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Bot className="size-4" />} onClick={togglePanel} aria-label={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")} />
+                                </Tooltip>
+                            ) : null}
                             <UserStatusActions />
                         </div>
                     </div>

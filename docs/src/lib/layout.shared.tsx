@@ -1,10 +1,9 @@
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
-import { appNames, gitConfig } from './shared';
+import { appNames } from './shared';
 import { ArrowUpRight } from 'lucide-react';
 import { i18n } from './i18n';
 import { uiTranslations } from 'fumadocs-ui/i18n';
 
-const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 const qqUrl = 'https://qm.qq.com/q/DFnKzZ807u';
 
 export const translations = i18n.translations().extend(uiTranslations()).add('ui', {
@@ -33,7 +32,6 @@ export const translations = i18n.translations().extend(uiTranslations()).add('ui
     menuToggle: '切换菜单',
     pageActionsCopyMarkdown: '复制 Markdown',
     pageActionsOpen: '打开',
-    pageActionsOpenGitHub: '在 GitHub 中打开',
     pageActionsViewMarkdown: '查看 Markdown',
     sidebarOpen: '打开侧边栏',
     sidebarCollapse: '收起侧边栏',
@@ -69,18 +67,9 @@ export function baseOptions(locale: string): BaseLayoutProps {
             <ArrowUpRight className="size-4" />
           </span>
         ),
-        url: 'https://canvas.best/',
+        url: 'https://canvas.zgonline.top/',
         external: true,
         on: 'nav',
-      },
-      {
-        type: 'icon',
-        text: 'GitHub',
-        label: 'GitHub',
-        url: githubUrl,
-        external: true,
-        on: 'menu',
-        icon: <img src="/github.svg" alt="" className="size-4" />,
       },
       {
         type: 'icon',

@@ -1,9 +1,117 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: infinite_canvas
+      POSTGRES_USER: infinite_canvas
+      POSTGRES_PASSWORD: infinite-canvas-local
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infinite_canvas -d infinite_canvas"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: infinite-canvas-local
+      MINIO_ROOT_PASSWORD: infinite-canvas-local-secret
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set canvas http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "canvas/$$S3_BUCKET" &&
+        (mc admin user info canvas "$$S3_ACCESS_KEY_ID" >/dev/null 2>&1 || mc admin user add canvas "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY") &&
+        mc admin policy attach canvas readwrite --user "$$S3_ACCESS_KEY_ID" &&
+        mc version enable "canvas/$$S3_BUCKET"
+    environment:
+      MINIO_ROOT_USER: infinite-canvas-local
+      MINIO_ROOT_PASSWORD: infinite-canvas-local-secret
+      S3_BUCKET: infinite-canvas
+      S3_ACCESS_KEY_ID: infinite-canvas-app
+      S3_SECRET_ACCESS_KEY: infinite-canvas-app-secret
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  migrate:
+    image: infinite-canvas-api:local
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    command: ["node", "dist/migrate.js"]
+    environment: &api-environment
+      NODE_ENV: production
+      PORT: 3002
+      DATABASE_URL: postgres://infinite_canvas:infinite-canvas-local@postgres:5432/infinite_canvas
+      APP_ORIGINS: ${APP_ORIGINS:-http://localhost:3000}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      BETTER_AUTH_SECRET: local-only-auth-secret-change-before-production
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: infinite-canvas
+      S3_ACCESS_KEY_ID: infinite-canvas-app
+      S3_SECRET_ACCESS_KEY: infinite-canvas-app-secret
+      S3_FORCE_PATH_STYLE: "true"
+      IMPORT_MAX_DOMAIN_BYTES: 16777216
+      IMPORT_MAX_FILE_BYTES: 268435456
+      IMPORT_MAX_TOTAL_BYTES: 21474836480
+      SUB2API_OIDC_DISCOVERY_URL: ${SUB2API_OIDC_DISCOVERY_URL:-}
+      SUB2API_CLIENT_ID: ${SUB2API_CLIENT_ID:-}
+      SUB2API_CLIENT_SECRET: ${SUB2API_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: infinite-canvas-api:local
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    environment: *api-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
   app:
     image: infinite-canvas:local
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - ${APP_BIND_HOST:-127.0.0.1}:${APP_PORT:-3000}:3000
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
     restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:

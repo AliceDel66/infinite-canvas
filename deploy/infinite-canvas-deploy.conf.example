@@ -1,0 +1,4 @@
+ALLOWED_REPOSITORY=AliceDel66/infinite-canvas
+PROJECT_DIR=/opt/infinite-canvas-deploy
+RELEASE_ROOT=/opt/infinite-canvas-releases
+LOCK_FILE=/var/lock/infinite-canvas-deploy.lock
