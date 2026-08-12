@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           tag=$(git describe --tags --exact-match HEAD)
-          version="v$(tr -d '[:space:]' < VERSION)"
+          version="$(tr -d '[:space:]' < VERSION)"
           test "$tag" = "$version"
           git fetch --no-tags origin main
           git merge-base --is-ancestor HEAD origin/main

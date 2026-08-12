@@ -43,7 +43,7 @@ Sub2API 尚未提供 OIDC Provider 时，`SUB2API_OIDC_DISCOVERY_URL`、`SUB2API
 
 PR 与 `main` push 会通过 `.github/workflows/ci.yml` 执行 Web、Server、Docs、插件、Compose 和 Shell 检查。`main` 检查成功后发布 `ghcr.io/<owner>/<repository>-web:<commit-sha>` 与 `ghcr.io/<owner>/<repository>-api:<commit-sha>`，再经 GitHub `production` Environment 部署。
 
-生产 SSH Key 由 `deploy/github-actions-entrypoint.sh` 限制，只接受 `probe` 与白名单仓库的 commit。`deploy/deploy-production.sh` 拉取不可变镜像，在 migration 前验证 PostgreSQL/MinIO 备份，检查内网与公网健康状态，失败时恢复旧源码和旧镜像 tag。数据库 migration 必须保持向后兼容；不兼容的 schema 降级只能在维护窗口中使用已验证备份人工执行。
+生产 SSH Key 由 `deploy/github-actions-entrypoint.sh` 限制，只接受 `probe` 与白名单仓库的 commit。部署包里的 entrypoint 必须与服务器已审核版本完全一致，entrypoint 升级由管理员手工安装，不能由 CI 自更新。`deploy/deploy-production.sh` 拉取不可变镜像，在 migration 前验证 PostgreSQL/MinIO 备份，检查内网与公网健康状态，失败时恢复旧源码和旧镜像 tag。数据库 migration 必须保持向后兼容；不兼容的 schema 降级只能在维护窗口中使用已验证备份人工执行。
 
 版本 tag 会为 Web/API 发布多架构镜像，同时保留 `v*` 与 commit-SHA tag；生产仍只部署 CI 验证过的 commit-SHA，不使用可变 tag。
 

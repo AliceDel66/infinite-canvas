@@ -1,6 +1,6 @@
 services:
   docs:
-    image: ghcr.io/basketikun/infinite-canvas-docs:latest
+    image: ${DOCS_IMAGE_REPOSITORY:-ghcr.io/alicedel66/infinite-canvas-docs}:${DOCS_IMAGE_TAG:-latest}
     ports:
       - "3001:3000"
     restart: unless-stopped

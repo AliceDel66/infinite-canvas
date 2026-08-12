@@ -78,6 +78,7 @@ jobs:
           for script in deploy/*.sh; do
             sh -n "$script"
           done
+          sh deploy/test-deploy-failure-propagation.sh
       - name: Validate Compose files
         run: |
           docker compose --env-file .env.example -f docker-compose.yml config --quiet

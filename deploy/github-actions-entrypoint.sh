@@ -60,6 +60,12 @@ case "$ACTOR" in
         ;;
 esac
 
+REMOTE_MAIN_SHA=$(git ls-remote --exit-code "https://github.com/$REPOSITORY.git" refs/heads/main | awk 'NR == 1 { print $1 }')
+[ "$SHA" = "$REMOTE_MAIN_SHA" ] || {
+    printf '%s\n' "commit is not the current main revision" >&2
+    exit 1
+}
+
 IFS= read -r REGISTRY_TOKEN
 [ -n "$REGISTRY_TOKEN" ] || {
     printf '%s\n' "registry token is missing" >&2
@@ -84,6 +90,10 @@ if [ ! -f "$RELEASE_DIR/.source-ready" ]; then
     }
     [ -f "$INCOMING/docker-compose.yml" ] && [ -f "$INCOMING/deploy/deploy-production.sh" ] || {
         printf '%s\n' "deployment bundle is incomplete" >&2
+        exit 1
+    }
+    cmp -s "$INCOMING/deploy/github-actions-entrypoint.sh" "$0" || {
+        printf '%s\n' "deployment entrypoint changes require manual server approval" >&2
         exit 1
     }
     touch "$INCOMING/.source-ready"

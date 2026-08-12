@@ -140,19 +140,19 @@ rollback() {
     printf '%s\n' "deployment failed; restoring source and application images" >&2
     rsync -a --delete \
         --exclude .env --exclude .git --exclude .codegraph --exclude node_modules --exclude dist \
-        "$SOURCE_BEFORE/" "$PROJECT_DIR/"
-    cp "$ENV_BEFORE" "$PROJECT_DIR/.env"
-    chmod 600 "$PROJECT_DIR/.env"
-    compose up -d --no-build postgres minio
-    wait_healthy postgres 180
-    wait_healthy minio 180
-    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from minio-init minio-init
-    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from migrate migrate
-    compose up -d --no-build --no-deps api
-    wait_healthy api 180
-    compose up -d --no-build --no-deps app
-    wait_healthy app 180
-    wait_public_health
+        "$SOURCE_BEFORE/" "$PROJECT_DIR/" || return 1
+    cp "$ENV_BEFORE" "$PROJECT_DIR/.env" || return 1
+    chmod 600 "$PROJECT_DIR/.env" || return 1
+    compose up -d --no-build postgres minio || return 1
+    wait_healthy postgres 180 || return 1
+    wait_healthy minio 180 || return 1
+    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from minio-init minio-init || return 1
+    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from migrate migrate || return 1
+    compose up -d --no-build --no-deps api || return 1
+    wait_healthy api 180 || return 1
+    compose up -d --no-build --no-deps app || return 1
+    wait_healthy app 180 || return 1
+    wait_public_health || return 1
     printf '%s\n' "rollback restored $PREVIOUS_API_IMAGE_REPOSITORY:$PREVIOUS_TAG and $PREVIOUS_WEB_IMAGE_REPOSITORY:$PREVIOUS_TAG" >&2
 }
 
@@ -168,7 +168,16 @@ docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin < "$GHCR_TOKEN
 release_compose config --quiet
 release_compose pull migrate api app
 
-DATA_BACKUP=$(PROJECT_DIR="$PROJECT_DIR" "$PROJECT_DIR/deploy/backup.sh" | tail -n 1)
+BACKUP_LOG="$STATE_DIR/backup.log"
+PROJECT_DIR="$PROJECT_DIR" "$PROJECT_DIR/deploy/backup.sh" > "$BACKUP_LOG" || {
+    printf '%s\n' "verified data backup failed" >&2
+    exit 1
+}
+DATA_BACKUP=$(tail -n 1 "$BACKUP_LOG")
+[ -n "$DATA_BACKUP" ] && [ -d "$DATA_BACKUP" ] && [ -f "$DATA_BACKUP/postgres.dump" ] && [ -f "$DATA_BACKUP/SHA256SUMS" ] || {
+    printf '%s\n' "backup did not return a verified artifact" >&2
+    exit 1
+}
 printf '%s\n' "$DATA_BACKUP" > "$STATE_DIR/data-backup-path"
 
 NEXT_ENV="$STATE_DIR/env.next"
@@ -177,21 +186,21 @@ write_release_env "$NEXT_ENV"
 deploy_release() {
     rsync -a --delete \
         --exclude .env --exclude .git --exclude .codegraph --exclude node_modules --exclude dist \
-        "$RELEASE_DIR/" "$PROJECT_DIR/"
-    cp "$NEXT_ENV" "$PROJECT_DIR/.env"
-    chmod 600 "$PROJECT_DIR/.env"
-    compose config --quiet
-    compose up -d --no-build postgres minio
-    wait_healthy postgres 180
-    wait_healthy minio 180
-    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from minio-init minio-init
-    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from migrate migrate
-    compose up -d --no-build --no-deps api
-    wait_healthy api 180
-    compose up -d --no-build --no-deps app
-    wait_healthy app 180
-    curl --fail --silent --show-error --max-time 15 "http://127.0.0.1:${APP_PORT:-3000}/api/v1/health" >/dev/null
-    wait_public_health
+        "$RELEASE_DIR/" "$PROJECT_DIR/" || return 1
+    cp "$NEXT_ENV" "$PROJECT_DIR/.env" || return 1
+    chmod 600 "$PROJECT_DIR/.env" || return 1
+    compose config --quiet || return 1
+    compose up -d --no-build postgres minio || return 1
+    wait_healthy postgres 180 || return 1
+    wait_healthy minio 180 || return 1
+    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from minio-init minio-init || return 1
+    compose up --no-build --no-deps --abort-on-container-exit --exit-code-from migrate migrate || return 1
+    compose up -d --no-build --no-deps api || return 1
+    wait_healthy api 180 || return 1
+    compose up -d --no-build --no-deps app || return 1
+    wait_healthy app 180 || return 1
+    curl --fail --silent --show-error --max-time 15 "http://127.0.0.1:${APP_PORT:-3000}/api/v1/health" >/dev/null || return 1
+    wait_public_health || return 1
 }
 
 if ! deploy_release; then
@@ -203,10 +212,6 @@ fi
 
 printf '%s\n' "$SHA" > "$STATE_DIR/deployed.sha"
 printf '%s\n' "$NEW_API_IMAGE_REPOSITORY:$SHA" "$NEW_WEB_IMAGE_REPOSITORY:$SHA" > "$STATE_DIR/images"
-
-ENTRYPOINT_TMP=/usr/local/sbin/.infinite-canvas-github-actions.new
-install -m 755 "$PROJECT_DIR/deploy/github-actions-entrypoint.sh" "$ENTRYPOINT_TMP"
-mv "$ENTRYPOINT_TMP" /usr/local/sbin/infinite-canvas-github-actions
 
 for repository in "$NEW_API_IMAGE_REPOSITORY" "$NEW_WEB_IMAGE_REPOSITORY"; do
     docker image ls "$repository" --format '{{.Repository}}:{{.Tag}}' |
