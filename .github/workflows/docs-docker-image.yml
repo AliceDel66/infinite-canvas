@@ -9,20 +9,22 @@ permissions:
   contents: read
   packages: write
 
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/infinite-canvas-docs
-
 jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
       labels: ${{ steps.meta.outputs.labels }}
+      image_name: ${{ steps.image.outputs.name }}
     steps:
+      - id: image
+        name: Resolve image name
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-docs" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=latest
             type=ref,event=tag
@@ -59,7 +61,7 @@ jobs:
           file: ./docs/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ needs.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ needs.meta.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=docs-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=docs-${{ matrix.arch }}
 
@@ -101,6 +103,7 @@ jobs:
         shell: bash
         env:
           TAGS: ${{ needs.meta.outputs.tags }}
+          IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
         run: |
           tag_args=()
           while IFS= read -r tag; do
